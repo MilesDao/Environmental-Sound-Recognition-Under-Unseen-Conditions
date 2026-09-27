@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from esr.corruptions import (
-    CORRUPTIONS, SEEN, UNSEEN, add_noise_at_snr, apply_corruption, colored_noise, random_train_corruption,
+    _fft_convolve, _fft_size, CORRUPTIONS, SEEN, UNSEEN, add_noise_at_snr, apply_corruption, colored_noise, random_train_corruption,
 )
 
 SR = 16000
@@ -104,3 +104,20 @@ def test_random_train_corruption_probability_extremes():
     out = random_train_corruption(x, 1.0, _gen())
     assert out.shape == x.shape and torch.isfinite(out).all()
     assert all(not torch.allclose(out[i], x[i]) for i in range(6))
+
+
+def test_fft_size_is_one_power_of_two_for_all_training_rir_lengths():
+    # Random RT60 (0.2-0.8 s) must not create a new cuFFT plan per clip (CUFFT_INTERNAL_ERROR on Kaggle).
+    sizes = {_fft_size(160000 + int(rt60 * SR) - 1) for rt60 in (0.2, 0.37, 0.55, 0.8, 1.0)}
+    assert len(sizes) == 1
+    (n,) = sizes
+    assert n & (n - 1) == 0 and n >= 160000 + SR - 1
+
+
+def test_fft_convolve_matches_direct_convolution():
+    import numpy as np
+
+    g = _gen(3)
+    x, h = torch.randn(2, 1000, generator=g), torch.randn(2, 37, generator=g)
+    expected = np.stack([np.convolve(x[i].numpy(), h[i].numpy())[:1000] for i in range(2)])
+    assert np.allclose(_fft_convolve(x, h).numpy(), expected, atol=1e-4)

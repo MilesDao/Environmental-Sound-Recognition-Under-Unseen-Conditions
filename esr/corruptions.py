@@ -41,8 +41,14 @@ def add_noise_at_snr(wav, noise, snr_db):
     return wav + noise * scale
 
 
+def _fft_size(n):
+    """Next power of two >= n. Random RIR lengths would otherwise make a new cuFFT plan per clip, which
+    fills the plan cache and raises CUFFT_INTERNAL_ERROR on GPU; one fixed size means one cached plan."""
+    return 1 << (n - 1).bit_length()
+
+
 def _fft_convolve(x, h):
-    n = x.size(-1) + h.size(-1) - 1
+    n = _fft_size(x.size(-1) + h.size(-1) - 1)  # extra zero padding does not change the linear convolution
     y = torch.fft.irfft(torch.fft.rfft(x, n=n) * torch.fft.rfft(h, n=n), n=n)
     return y[..., : x.size(-1)]
 
