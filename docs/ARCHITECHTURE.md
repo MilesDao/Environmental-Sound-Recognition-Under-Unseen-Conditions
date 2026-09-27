@@ -45,22 +45,26 @@ under **acoustic conditions it never saw during training** — and which trainin
 | Kind of domain shift | How it is produced | What it tells us |
 |---|---|---|
 | **Natural** | FSD50K's `eval` split was recorded by **different uploaders** than the `dev` split (different microphones, rooms, devices) | Clean eval mAP already measures generalization |
-| **Controlled** | 5 corruption types applied to the eval set, 3 severities each | Pinpoints which kind of condition the model is weak on |
+| **Controlled** | 7 corruption types applied to the eval set, 3 severities each | Pinpoints which kind of condition the model is weak on |
 
-The five corruptions are split into two groups:
+The seven corruptions are split into two groups:
 
 - **SEEN** (used as training augmentation by the `effnet_robust` model): `white_noise`, `reverb`.
-- **UNSEEN** (test-time only, **never** used in training): `brown_noise`, `telephone`, `clipping`.
+- **UNSEEN** (test-time only, **never** used in training): `brown_noise`, `telephone`, `clipping`, `speed`, `quantize`.
 
 The key question of the experiment: *does robustness training on the SEEN group transfer to the UNSEEN group?*
 
-**Three experiments:**
+**Seven experiments:**
 
 | Name | Model | Pretrained | Augmentation | Comparison it answers |
 |---|---|---|---|---|
 | `cnn_baseline` | SimpleCNN (VGG-style) | No | SpecAugment + mixup | Reference point |
 | `effnet_standard` | EfficientNet-B0 | ImageNet | SpecAugment + mixup | Effect of architecture + pretraining |
 | `effnet_robust` | EfficientNet-B0 | ImageNet | + Freq-MixStyle (p=0.7) + SEEN corruptions (p=0.5) | Effect of robustness training |
+| `effnet_robust_v2` | EfficientNet-B0 | ImageNet | + Freq-MixStyle (p=0.7) + SEEN corruptions (p=0.5, widened to SNR 0–30 dB / RT60 0.2–1.0 s) + random EQ (p=0.5) | Does a generic spectral-envelope augmentation close the `telephone` gap? |
+| `effnet_mixstyle` | EfficientNet-B0 | ImageNet | + Freq-MixStyle (p=0.7) only | Ablation: MixStyle alone |
+| `effnet_corrupt` | EfficientNet-B0 | ImageNet | + SEEN corruptions (p=0.5) only | Ablation: corruption augmentation alone |
+| `effnet_eq` | EfficientNet-B0 | ImageNet | + random EQ (p=0.5) only | Ablation: random EQ alone |
 
 ---
 
@@ -131,7 +135,7 @@ against a synthetic FSD50K. On Kaggle, the notebook **only clones the repo and c
 │   └── compare.py                → esr.cli.main(["compare", ...])
 ├── notebooks/
 │   └── kaggle_run.ipynb          Kaggle notebook: clone repo + run scripts
-└── tests/                        97 tests, run against synthetic data
+└── tests/                        130 tests, run against synthetic data
     ├── conftest.py               Fixtures: fake FSD50K (fake_root) + tiny_cfg
     ├── test_config.py  test_data.py  test_models.py  test_augment.py
     ├── test_corruptions.py  test_metrics.py  test_engine.py  test_pipeline.py
@@ -188,7 +192,10 @@ dev.csv ──load_split("train")──► (meta: fname,path) + targets [N,200] 
                                         │   (wav [L], y [200])
          DataLoader (class-balanced WeightedRandomSampler, batch 32, 4 workers, drop_last)
                                         │   wav [B,160000] ─► GPU
-               random_train_corruption (effnet_robust only: white noise / reverb, p=0.5 per clip)
+               random_train_corruption (white noise / reverb, p=corruption_aug_p; ranges configurable via
+                                         cfg.train_snr_db / cfg.train_rt60_s, default 5-30 dB / 0.2-0.8 s)
+                                        │
+                     random_eq (FilterAugment-style ±eq_max_db tilt, p=eq_aug_p; runs only if eq_aug_p > 0)
                                         │
                      waveform mixup (λ ~ Beta(0.5,0.5), λ ≥ 0.5)
                                         │
@@ -207,14 +214,14 @@ dev.csv ──load_split("train")──► (meta: fname,path) + targets [N,200] 
 ```
 eval.csv ──load_split("eval")──► paths + targets
          load_waveforms (8 threads) → int16 matrix [10,231, 160,000] in RAM (~3.3 GB)
-                                        │  (loaded ONCE for all 16 conditions)
-   for (condition, group, severity) in [clean] + SEEN×{1,2,3} + UNSEEN×{1,2,3}:   → 16 passes
+                                        │  (loaded ONCE for all 22 conditions)
+   for (condition, group, severity) in [clean] + SEEN×{1,2,3} + UNSEEN×{1,2,3}:   → 22 passes
         predict_array: batch → float32/32767 → GPU
-                       generator seed = seed*100003 + batch_index  → apply_corruption
+                       generator seed = seed*100003 + clip_index  → apply_corruption
                        → model → sigmoid → scores
         mean_average_precision(targets, scores)
                                         │
-                     robustness.csv (experiment, condition, group, severity, mAP, subset)
+                     robustness.csv (experiment, condition, group, severity, mAP, subset, protocol)
 ```
 
 ---
@@ -235,18 +242,31 @@ eval.csv ──load_split("eval")──► paths + targets
 | Optimization | `batch_size`, `epochs`, `lr`, `weight_decay`, `warmup_epochs` | 32, 20, 5e-4, 1e-2, 1 | |
 | System | `num_workers`, `amp`, `seed` | 4, True, 42 | |
 | Augmentation | `balanced_sampling`, `spec_augment`, `mixup_alpha`, `freq_mixstyle_p`, `corruption_aug_p` | True, True, 0.5, 0.0, 0.0 | `mixup_alpha=0` disables mixup |
+| | `train_snr_db`, `train_rt60_s` | (5.0, 30.0), (0.2, 0.8) | Ranges used by `random_train_corruption` (the seen-family training augmentation) |
+| | `eq_aug_p`, `eq_max_db` | 0.0, 12.0 | Probability and max ±dB tilt of `random_eq` (runs after `random_train_corruption`, before mixup) |
 | Evaluation | `severities` | (1,2,3) | |
 | Subsets | `max_train_clips`, `max_eval_clips` | 0 (= all) | Used by the `--quick` smoke test |
 | Resume | `resume_from` | `""` | Path to a previous session's `last.pt` |
 
 `to_dict()` turns the `severities` tuple into a list so it can be written as JSON (`config.json`).
 
-**`EXPERIMENTS`** — three presets that only hold what differs from the defaults:
+**`EXPERIMENTS`** — seven presets that only hold what differs from the defaults:
 
 ```python
-"cnn_baseline":    dict(model="simple_cnn", pretrained=False, lr=1e-3)
-"effnet_standard": dict(model="efficientnet_b0", pretrained=True, lr=5e-4)
-"effnet_robust":   dict(model="efficientnet_b0", pretrained=True, lr=5e-4, freq_mixstyle_p=0.7, corruption_aug_p=0.5)
+_EFFNET = dict(model="efficientnet_b0", pretrained=True, lr=5e-4)
+
+EXPERIMENTS = {
+    "cnn_baseline": dict(model="simple_cnn", pretrained=False, lr=1e-3),
+    "effnet_standard": dict(_EFFNET),
+    "effnet_robust": dict(_EFFNET, freq_mixstyle_p=0.7, corruption_aug_p=0.5),  # Experiment 1
+    # v2: + random EQ, and seen-corruption ranges widened to cover severity 3 (0 dB SNR, RT60 1.0 s)
+    "effnet_robust_v2": dict(_EFFNET, freq_mixstyle_p=0.7, corruption_aug_p=0.5, eq_aug_p=0.5,
+                             train_snr_db=(0.0, 30.0), train_rt60_s=(0.2, 1.0)),
+    # ablations: exactly one robustness component each (v1 ranges)
+    "effnet_mixstyle": dict(_EFFNET, freq_mixstyle_p=0.7),
+    "effnet_corrupt": dict(_EFFNET, corruption_aug_p=0.5),
+    "effnet_eq": dict(_EFFNET, eq_aug_p=0.5),
+}
 ```
 
 **`make_config(experiment, **overrides)`** — precedence: *Config defaults* < *experiment preset* < *overrides*.
@@ -311,6 +331,12 @@ per-frequency mean/std.
 Why SpecAugment is implemented in-house: torchaudio ≥ 2.9 is in maintenance mode and has dropped many APIs; writing it
 ourselves avoids a version dependency. In the whole package, torchaudio is used **only** for `MelSpectrogram`.
 
+`random_eq(wav, p, gen, sample_rate, max_db=12.0, n_points=(3, 6))` — FilterAugment-style (Nam et al., 2022) random EQ on
+the **waveform**, per clip with probability `p`: a gain curve that is piecewise-linear in dB over log-frequency through
+3–6 random anchors in `[-max_db, +max_db]` (±12 dB by default), applied via one `rfft`/`irfft` pass, with the clip's RMS
+restored afterwards so the augmentation changes tone, not loudness. In `train_one_epoch` it runs **after** the seen-family
+`random_train_corruption` and **before** mixup, and only when `cfg.eq_aug_p > 0`.
+
 ### 6.5 `esr/corruptions.py` — Acoustic corruption suite
 
 Every corruption function has **the same signature**:
@@ -326,6 +352,8 @@ fn(wav: Tensor[B, L], severity: int ∈ {1,2,3}, gen: torch.Generator (CPU), sam
 | `brown_noise` | UNSEEN | SNR 20 / 10 / 0 dB | Power spectrum ~ 1/f² (shaped in the FFT domain) |
 | `telephone` | UNSEEN | pass band 100–5000 / 300–3400 / 500–2000 Hz | Mask in the `rfft` domain, then `irfft` |
 | `clipping` | UNSEEN | threshold 50 % / 20 % / 5 % of peak | Clamp at ±threshold, then re-amplify to **keep the original peak amplitude** |
+| `speed` | UNSEEN | ×1.05 / ×1.15 / ×1.3 | linear resample, zero-pad the tail (no anti-aliasing; content above ~8 kHz / factor folds back) |
+| `quantize` | UNSEEN | 8 / 6 / 4 bits | uniform steps relative to the clip peak |
 
 Helpers:
 
@@ -334,13 +362,17 @@ Helpers:
   so the zero padding of short clips does not "dilute" the signal level. A completely silent clip uses a −60 dBFS floor (1e-3)
   instead of producing NaN or adding nothing.
 - `apply_corruption(wav, name, severity, gen, sr)` — looks up `CORRUPTIONS`; an unknown name raises `KeyError`.
-- `random_train_corruption(wav, p, gen, sr)` — training augmentation: for each clip, with probability `p`, applies **one** SEEN
-  corruption with **continuous parameters** (SNR ∈ [5, 30] dB or RT60 ∈ [0.2, 0.8] s). It only calls SEEN-group functions, so
-  **UNSEEN corruptions cannot leak into training**.
+- `random_train_corruption(wav, p, gen, sr, snr_db=(5.0, 30.0), rt60_s=(0.2, 0.8))` — training augmentation: for each clip,
+  with probability `p`, applies **one** SEEN corruption with **continuous parameters** drawn from `snr_db`/`rt60_s` (the
+  defaults shown; `run_training` passes `cfg.train_snr_db`/`cfg.train_rt60_s`, so the range is configurable per experiment
+  preset). It only calls SEEN-group functions, so **UNSEEN corruptions cannot leak into training**.
 
 **Important — determinism:** every random number is drawn **on the CPU** from the `torch.Generator` that is passed in, and only
 then moved with `.to(device)`. The same seed therefore gives **exactly the same noise signal** on CPU and GPU, and every model is
 evaluated on **the same corrupted audio** → a fair comparison.
+
+**Protocol v2:** noise SNR is measured on the 50–8000 Hz band (`SNR_BAND_HZ`); v1 used broadband RMS, which made brown
+noise ~29 dB milder in-band. `PROTOCOL` is written to every row, and `compare` keeps only the latest protocol.
 
 ### 6.6 `esr/models.py` — Models
 
@@ -376,7 +408,7 @@ If no class has a positive example → `ValueError`. This situation is very comm
 | `load_checkpoint(path, model, optimizer, scheduler, scaler)` | `torch.load(map_location="cpu", weights_only=False)`; restores whatever objects are passed; returns the full state (including `epoch`, `best_map`, `history`) |
 | `train_one_epoch(...)` | One epoch of training (details in [§8](#8-training-loop)); returns the mean loss |
 | `predict(model, loader, device, amp)` | Iterates a DataLoader → `(y_true, sigmoid(logits))` as numpy |
-| `predict_array(model, waves_int16, ..., corruption, severity, seed)` | Predicts on the in-RAM int16 matrix; batch `b` is corrupted with generator seed `seed·100003 + b` |
+| `predict_array(model, waves_int16, ..., corruption, severity, seed)` | Predicts on the in-RAM int16 matrix; every clip is corrupted with its own generator, seeded `seed·100003 + clip_index`, so eval noise no longer depends on `batch_size` |
 
 ### 6.9 `esr/pipeline.py` — High-level entry points
 
@@ -398,8 +430,8 @@ Three subcommands:
 | Command | Calls | What it does |
 |---|---|---|
 | `train` | `run_training(cfg)` | Trains one experiment (resumes automatically) |
-| `evaluate` | `run_robustness(cfg, checkpoint)` | 16 conditions on the eval set → `robustness.csv` |
-| `compare` | `compare(inputs, include_subset, out)` | Collects every `robustness.csv` → summary table + `summary.csv` |
+| `evaluate` | `run_robustness(cfg, checkpoint)` | 22 conditions on the eval set → `robustness.csv` |
+| `compare` | `compare(inputs, include_subset, out)` | Collects every `robustness.csv` → summary table + `summary.csv` + `summary_by_condition.csv` |
 
 How flags map to `Config` (`build_config`):
 1. A flag that is **not passed** **does not override** anything → the experiment preset's default stays (e.g. `cnn_baseline` keeps `lr=1e-3`).
@@ -407,13 +439,21 @@ How flags map to `Config` (`build_config`):
    (`/kaggle/working/outputs_quick` or `<--out-dir>_quick`) → **smoke-test results never mix with real runs**.
 3. `--no-amp`, `--no-pretrained`, `--severities 1 2 3` map directly.
 4. If `--data-path` is omitted → `find_data_root(--search-root)`.
+5. `--checkpoint` (evaluate only) defaults to `best.pt` in `<out_dir>/<experiment>/`, but also accepts an **absolute
+   path** (e.g. a `best.pt` attached from `/kaggle/input/...`) — `run_robustness` always writes its results to
+   `<out_dir>/<experiment>/`, even when the checkpoint itself comes from elsewhere.
 
 `compare`:
 - By default searches `/kaggle/working/outputs/*/robustness.csv` and `/kaggle/input/**/robustness.csv`.
 - **Drops rows with `subset=True`** (`--quick` results) unless `--include-subset` is passed; if only subset results remain it fails
   with a clear message.
+- **Keeps only the latest evaluation protocol** (the `protocol` column): rows from an older protocol are dropped, with a
+  printed warning naming the affected experiments. CSVs without a `protocol` column (written before protocols existed)
+  count as protocol 1.
 - Prints the **source file** of each experiment so the user can check where every row of the table came from.
 - Older CSVs without a `subset` column are treated as `False` (backward compatible).
+- Writes the summary table to `--out` (default `summary.csv`) and a per-condition-and-severity relative-mAP table
+  (`per_condition`) to `<out stem>_by_condition.csv` (default `summary_by_condition.csv`).
 
 `scripts/{train,evaluate,compare}.py` are 3-line wrappers: they add the repo root to `sys.path`, then call
 `main(["<command>", *sys.argv[1:]])`.
@@ -502,10 +542,10 @@ conditions would no longer be unseen.
 
 `run_robustness(cfg)`:
 
-1. Checks that `<exp_dir>/best.pt` exists (if not → `FileNotFoundError` suggesting to run `train` first).
+1. Checks that `<exp_dir>/best.pt` exists (if not → `FileNotFoundError` suggesting to run `train` first). `--checkpoint` may instead be an absolute path (for example, a checkpoint attached from `/kaggle/input`); either way, results always go to `<out_dir>/<experiment>/`.
 2. Builds the model (`pretrained=False`) and loads the checkpoint.
 3. Loads the eval set into RAM once (`load_waveforms`). If `max_eval_clips > 0`: picks a **seeded random subset**.
-4. Runs 16 conditions: `clean` (severity 0) + 2 SEEN × 3 + 3 UNSEEN × 3.
+4. Runs 22 conditions: `clean` (severity 0) + 2 SEEN × 3 + 5 UNSEEN × 3.
 5. Each condition → macro mAP → one row of `robustness.csv`.
 6. The column `subset = bool(max_train_clips or max_eval_clips)` marks smoke-test results.
 
@@ -520,8 +560,11 @@ conditions would no longer be unseen.
 The key comparisons: `effnet_standard` vs `cnn_baseline` (architecture + pretraining), and **`effnet_robust` vs
 `effnet_standard` on the `unseen` column** (does robustness training transfer to conditions it never saw?).
 
-Note: the "seen" label is defined **relative to `effnet_robust`'s training**. For `cnn_baseline` and `effnet_standard` all five
-corruptions are unseen; their `seen` column exists only so all models are compared on the same set of conditions.
+Note: the "seen" label is defined **relative to which presets train on the SEEN corruptions** (`white_noise`, `reverb`
+via `corruption_aug_p`): `effnet_robust`, `effnet_robust_v2` and `effnet_corrupt` do; `effnet_mixstyle` and `effnet_eq`
+do not (their robustness component is MixStyle or EQ, not corruption augmentation). For `cnn_baseline`,
+`effnet_standard`, `effnet_mixstyle` and `effnet_eq`, all seven corruptions are unseen; their `seen` column exists only
+so all models are compared on the same set of conditions.
 
 ---
 
@@ -563,8 +606,9 @@ else:
 ├── history.csv        epoch, train_loss, val_mAP, lr, seconds
 ├── last.pt            Full checkpoint for resuming
 ├── best.pt            Best checkpoint by clean val mAP (used by evaluate)
-└── robustness.csv     experiment, condition, group, severity, mAP, subset
+└── robustness.csv     experiment, condition, group, severity, mAP, subset, protocol
 /kaggle/working/summary.csv                    experiment, clean, seen, unseen, seen_rel, unseen_rel
+/kaggle/working/summary_by_condition.csv       experiment, condition, group, severity, mAP, rel
 ```
 
 ---
@@ -581,7 +625,7 @@ Setup: *Add Input* → `yousirui1/fsd50k`; *Settings* → Accelerator **GPU T4**
 ```
 
 ```python
-EXPERIMENT = "effnet_robust"   # cnn_baseline | effnet_standard | effnet_robust
+EXPERIMENT = "effnet_robust"   # cnn_baseline | effnet_standard | effnet_robust | effnet_robust_v2 | effnet_mixstyle | effnet_corrupt | effnet_eq
 DATA_PATH = "/kaggle/input/datasets/yousirui1/fsd50k/fsd50k"
 # 1) Smoke test (~15 min)
 !python scripts/train.py    --experiment $EXPERIMENT --data-path $DATA_PATH --quick
@@ -589,7 +633,7 @@ DATA_PATH = "/kaggle/input/datasets/yousirui1/fsd50k/fsd50k"
 # 2) Real run — use Save Version → Save & Run All so it runs in the background
 !python scripts/train.py    --experiment $EXPERIMENT --data-path $DATA_PATH
 !python scripts/evaluate.py --experiment $EXPERIMENT --data-path $DATA_PATH
-# 3) After all three experiments (add their outputs as Inputs)
+# 3) After the experiments you ran (add their outputs as Inputs)
 !python scripts/compare.py --out /kaggle/working/summary.csv
 ```
 
@@ -600,7 +644,7 @@ All flags: `python scripts/train.py --help`.
 
 ## 13. Testing strategy
 
-- **97 tests**, running on CPU in a few tens of seconds, **downloading nothing** (`pretrained=False`).
+- **130 tests**, running on CPU in a few tens of seconds, **downloading nothing** (`pretrained=False`).
 - The `fake_root` fixture (`tests/conftest.py`) creates a **fake FSD50K** with the real folder names, the real CSV schemas
   (header-less vocabulary, comma-separated labels) and the same folder nesting as Kaggle; the audio is a sine tone per class,
   0.3–2.5 s long.
@@ -643,14 +687,15 @@ The points below are **the reason many "seemingly redundant" lines exist**. Keep
 10. **The random crop uses a fresh `np.random.default_rng()` per item** — avoids DataLoader workers producing the same crop.
 11. **Noise is drawn on the CPU from the passed-in generator** and only then moved to the GPU. Do not switch to
     `torch.randn(..., device="cuda")`: results would differ between CPU/GPU and between runs.
-12. **Evaluation noise depends on `batch_size`** (seeded per batch index). For a fair comparison, **evaluate every model with the
-    same `--batch-size`** (default 32).
+12. **Evaluation noise is seeded per clip (protocol v2), so it no longer depends on `batch_size`.**
 13. **SNR is computed on the audible part** (`_active_rms`), not on the zero padding — otherwise short clips would get noise
     5–15 dB weaker than their SNR label says.
 14. **Silent clips** get noise at a −60 dBFS floor — no NaN, and never "nothing changes".
 15. **Reverb keeps the RMS; clipping keeps the peak amplitude** — so the model cannot tell a corruption apart by loudness alone.
 16. **No UNSEEN leakage:** `random_train_corruption` only calls `add_noise_at_snr` (white) and `apply_reverb`. Do not add UNSEEN
-    corruptions there, or the experiment loses its meaning.
+    corruptions there, or the experiment loses its meaning. `random_eq` (training only) is a smooth ±12 dB tilt. It overlaps
+    *in kind* with `telephone` (both change the spectral envelope), so always report `telephone` results for
+    `effnet_robust_v2` with that caveat.
 17. **Checkpoints are selected on clean val only.** Do not evaluate corruptions during training.
 18. **Checkpoints are written atomically** (`.tmp` + `os.replace`). Never write straight into `last.pt`.
 19. **`resume_from` is only used when `last.pt` does not exist yet** — if the folder already has a `last.pt` (same session), that one wins.
@@ -677,7 +722,7 @@ The points below are **the reason many "seemingly redundant" lines exist**. Keep
 | RAM for the in-memory eval set (int16) | ~3.3 GB |
 | Time per epoch | ~8–12 min |
 | 20 training epochs | ~3–4 h (`effnet_robust` takes longer because of the corruption augmentation) |
-| Evaluation, 16 conditions × 10,231 clips | ~30–45 min |
+| Evaluation, 22 conditions × 10,231 clips | ~40–60 min |
 | `--quick` smoke test | ~15 min |
 
 Kaggle limits: 12-hour sessions, ~30 GPU-hours per week → one version per experiment.
@@ -694,7 +739,7 @@ default settings are used):
 
 | ID | Issue | Suggested fix |
 |---|---|---|
-| M-1 | Evaluation noise depends on `batch_size` | Use a fixed evaluation batch size or seed per clip |
+| M-1 | ~~Evaluation noise depends on `batch_size`~~ — **resolved in v2**: `predict_array` seeds per clip (`seed·100003 + clip_index`) | Use a fixed evaluation batch size or seed per clip |
 | M-2 | Resume replays the first session's sampler/augmentation order | Seed with `seed + start_epoch` or save the generator state |
 | M-3 | Train + val loaders each keep 4 persistent workers on 4 CPUs | `num_workers=2`, no persistent workers for val |
 | M-4 | `find_data_root` does not check that the `*_16k` folders exist | Require `FSD50K.dev_audio_16k` next to the hit |
@@ -740,6 +785,7 @@ Deliberate design choices (from the spec):
 **Common commands:**
 
 ```bash
+# --experiment choices: cnn_baseline | effnet_corrupt | effnet_eq | effnet_mixstyle | effnet_robust | effnet_robust_v2 | effnet_standard
 python scripts/train.py    --experiment effnet_robust [--quick] [--epochs N] [--batch-size B] [--resume-from PATH]
 python scripts/evaluate.py --experiment effnet_robust [--quick] [--severities 1 2 3] [--checkpoint best.pt]
 python scripts/compare.py  [--inputs GLOB ...] [--include-subset] [--out summary.csv]

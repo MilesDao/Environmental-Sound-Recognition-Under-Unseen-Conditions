@@ -22,10 +22,23 @@ def test_make_config_unknown_experiment_raises():
         make_config("does_not_exist")
 
 
-def test_experiments_are_exactly_the_three_in_the_spec():
-    assert set(EXPERIMENTS) == {"cnn_baseline", "effnet_standard", "effnet_robust"}
+def test_experiment_presets():
+    assert set(EXPERIMENTS) == {"cnn_baseline", "effnet_standard", "effnet_robust", "effnet_robust_v2",
+                                "effnet_mixstyle", "effnet_corrupt", "effnet_eq"}
     assert make_config("cnn_baseline").model == "simple_cnn"
-    assert make_config("effnet_standard").corruption_aug_p == 0.0
+    knobs = ("freq_mixstyle_p", "corruption_aug_p", "eq_aug_p")
+    assert all(getattr(make_config("effnet_standard"), k) == 0.0 for k in knobs)
+    v1 = make_config("effnet_robust")  # must stay exactly the Experiment 1 recipe
+    assert (v1.freq_mixstyle_p, v1.corruption_aug_p, v1.eq_aug_p) == (0.7, 0.5, 0.0)
+    assert v1.train_snr_db == (5.0, 30.0) and v1.train_rt60_s == (0.2, 0.8)
+    v2 = make_config("effnet_robust_v2")
+    assert (v2.freq_mixstyle_p, v2.corruption_aug_p, v2.eq_aug_p) == (0.7, 0.5, 0.5)
+    assert v2.train_snr_db == (0.0, 30.0) and v2.train_rt60_s == (0.2, 1.0)
+    for name, knob in [("effnet_mixstyle", "freq_mixstyle_p"), ("effnet_corrupt", "corruption_aug_p"),
+                       ("effnet_eq", "eq_aug_p")]:
+        cfg = make_config(name)
+        assert {k for k in knobs if getattr(cfg, k) > 0} == {knob}
+        assert cfg.model == "efficientnet_b0" and cfg.pretrained
 
 
 def test_to_dict_is_json_serializable():

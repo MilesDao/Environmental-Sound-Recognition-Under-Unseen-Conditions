@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from .augment import make_spec_transform
-from .corruptions import SEEN, UNSEEN
+from .corruptions import PROTOCOL, SEEN, UNSEEN
 from .data import FSD50KDataset, load_split, load_vocab, load_waveforms, make_balanced_sampler
 from .engine import (
     get_device, load_checkpoint, make_scheduler, predict, predict_array, save_checkpoint, set_seed,
@@ -105,9 +105,13 @@ def run_training(cfg):
 def run_robustness(cfg, checkpoint="best.pt", waves=None, targets=None):
     """Evaluate on the (uploader-disjoint) eval set: clean + every corruption x severity."""
     exp_dir = Path(cfg.out_dir) / cfg.experiment
-    ckpt = exp_dir / checkpoint
+    ckpt = Path(checkpoint)
+    if not ckpt.is_absolute():
+        ckpt = exp_dir / ckpt
     if not ckpt.exists():
-        raise FileNotFoundError(f"{ckpt} not found - call run_training(cfg) first (or set out_dir).")
+        raise FileNotFoundError(f"{ckpt} not found - call run_training(cfg) first "
+                                "(or pass --checkpoint /kaggle/input/.../best.pt).")
+    exp_dir.mkdir(parents=True, exist_ok=True)  # results always go to out_dir, even for an input checkpoint
     device = get_device()
     labels, _ = load_vocab(cfg.data_root)
     model = build_model(cfg, len(labels), pretrained=False).to(device)
@@ -132,9 +136,9 @@ def run_robustness(cfg, checkpoint="best.pt", waves=None, targets=None):
                                severity=severity, seed=cfg.seed, sample_rate=cfg.sample_rate)
         m = mean_average_precision(targets, scores)
         rows.append({"experiment": cfg.experiment, "condition": name, "group": group,
-                     "severity": severity, "mAP": m, "subset": subset})
+                     "severity": severity, "mAP": m, "subset": subset, "protocol": PROTOCOL})
         print(f"[{cfg.experiment}] {name:12s} sev={severity} ({group:6s}) mAP={m:.4f}")
-    df = pd.DataFrame(rows, columns=["experiment", "condition", "group", "severity", "mAP", "subset"])
+    df = pd.DataFrame(rows, columns=["experiment", "condition", "group", "severity", "mAP", "subset", "protocol"])
     df.to_csv(exp_dir / "robustness.csv", index=False)
     return df
 
@@ -148,3 +152,11 @@ def summarize(df):
             out[g] = np.nan
         out[f"{g}_rel"] = out[g] / out["clean"]
     return out[["clean", "seen", "unseen", "seen_rel", "unseen_rel"]].reset_index(names="experiment")
+
+
+def per_condition(df):
+    """mAP and relative mAP (corrupted / clean of the same experiment) for every condition x severity."""
+    clean = df[df["group"] == "clean"].groupby("experiment")["mAP"].mean()
+    out = df[df["group"] != "clean"][["experiment", "condition", "group", "severity", "mAP"]].copy()
+    out["rel"] = out["mAP"] / out["experiment"].map(clean)
+    return out.sort_values(["experiment", "group", "condition", "severity"]).reset_index(drop=True)

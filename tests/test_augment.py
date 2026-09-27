@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from esr.augment import freq_mixstyle, make_spec_transform, mixup, spec_augment
+from esr.augment import freq_mixstyle, make_spec_transform, mixup, random_eq, spec_augment
 from esr.config import make_config
 
 
@@ -56,3 +56,28 @@ def test_make_spec_transform_per_experiment():
     assert make_spec_transform(make_config("cnn_baseline", spec_augment=False)) is None
     tf = make_spec_transform(make_config("effnet_robust"))
     assert tf(torch.randn(4, 1, 64, 101)).shape == (4, 1, 64, 101)
+
+
+def test_random_eq_p0_is_identity():
+    x = torch.randn(3, 16000)
+    assert torch.equal(random_eq(x, 0.0, torch.Generator().manual_seed(0)), x)
+
+
+def test_random_eq_changes_every_clip_keeps_rms_and_is_deterministic():
+    x = torch.randn(4, 16000, generator=torch.Generator().manual_seed(1))
+    a = random_eq(x, 1.0, torch.Generator().manual_seed(0))
+    b = random_eq(x, 1.0, torch.Generator().manual_seed(0))
+    assert torch.equal(a, b) and a.shape == x.shape
+    assert all(not torch.allclose(a[i], x[i], atol=1e-3) for i in range(4))
+    assert torch.allclose(a.pow(2).mean(-1), x.pow(2).mean(-1), rtol=1e-3)
+
+
+def test_random_eq_gain_stays_within_max_db():
+    x = torch.randn(2, 16000, generator=torch.Generator().manual_seed(2))
+    y = random_eq(x, 1.0, torch.Generator().manual_seed(0), max_db=6.0)
+    ratio_db = 10 * torch.log10(torch.fft.rfft(y).abs().pow(2) / torch.fft.rfft(x).abs().pow(2))
+    assert (ratio_db.amax(-1) - ratio_db.amin(-1) <= 12.0 + 1e-2).all()
+
+
+def test_random_eq_silent_clip_stays_finite():
+    assert torch.isfinite(random_eq(torch.zeros(2, 16000), 1.0, torch.Generator().manual_seed(0))).all()

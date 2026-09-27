@@ -7,6 +7,7 @@
 import argparse
 import glob
 import sys
+from pathlib import Path
 
 import pandas as pd
 
@@ -41,7 +42,9 @@ def _add_run_args(p):
     p.add_argument("--resume-from", help="last.pt from a previous Kaggle version")
     p.add_argument("--seed", type=int)
     p.add_argument("--severities", type=int, nargs="+", choices=[1, 2, 3])
-    p.add_argument("--checkpoint", default="best.pt", help="evaluate only: checkpoint file name")
+    p.add_argument("--checkpoint", default="best.pt",
+                   help="evaluate only: file name in <out-dir>/<experiment>/ or an absolute path "
+                        "(e.g. a best.pt attached from /kaggle/input)")
     p.add_argument("--no-amp", action="store_true")
     p.add_argument("--no-pretrained", action="store_true")
 
@@ -80,7 +83,7 @@ def build_config(args):
 
 
 def compare(inputs, include_subset=False, out=None):
-    from .pipeline import summarize
+    from .pipeline import per_condition, summarize
 
     paths = sorted({p for pattern in inputs for p in glob.glob(pattern, recursive=True)})
     if not paths:
@@ -90,6 +93,8 @@ def compare(inputs, include_subset=False, out=None):
         df = pd.read_csv(p)
         if "subset" not in df:
             df["subset"] = False
+        if "protocol" not in df:
+            df["protocol"] = 1  # written before protocol versions existed
         df["source"] = p
         frames.append(df)
     allres = pd.concat(frames, ignore_index=True)
@@ -97,13 +102,23 @@ def compare(inputs, include_subset=False, out=None):
         allres = allres[~allres["subset"].astype(bool)]
     if allres.empty:
         raise SystemExit("Only --quick (subset) results found; pass --include-subset to compare them anyway.")
+    latest = allres["protocol"].max()
+    stale = sorted(set(allres.loc[allres["protocol"] < latest, "experiment"]))
+    if stale:
+        print(f"Skipping protocol < {latest} results (re-run evaluate on them): {', '.join(stale)}")
+    allres = allres[allres["protocol"] == latest]
     allres = allres.drop_duplicates(["experiment", "condition", "severity"], keep="last")
+    print(f"Protocol {latest} results")
     for exp, src in allres.groupby("experiment")["source"].first().items():
         print(f"{exp}: {src}")
     table = summarize(allres)
     print(table.round(4).to_string(index=False))
+    detail = per_condition(allres)
+    print(detail.pivot_table(index=["group", "condition", "severity"], columns="experiment", values="rel")
+          .round(3).to_string())
     if out:
         table.to_csv(out, index=False)
+        detail.to_csv(Path(out).with_name(Path(out).stem + "_by_condition.csv"), index=False)
     return table
 
 

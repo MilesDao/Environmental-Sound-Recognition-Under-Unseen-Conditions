@@ -3,7 +3,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from esr.cli import build_config, main, parse_args
+from esr.cli import build_config, compare, main, parse_args
+from esr.corruptions import SEEN, UNSEEN
 
 TINY = ["--clip-seconds", "1", "--n-mels", "64", "--batch-size", "4", "--num-workers", "0", "--no-amp",
         "--no-pretrained", "--warmup-epochs", "0"]
@@ -50,7 +51,7 @@ def test_train_evaluate_compare_end_to_end(fake_root, tmp_path):
     main(["train", "--experiment", "cnn_baseline", *_args(fake_root, out), "--epochs", "1"])
     main(["evaluate", "--experiment", "cnn_baseline", *_args(fake_root, out), "--severities", "1"])
     csv = out / "cnn_baseline" / "robustness.csv"
-    assert csv.exists() and len(pd.read_csv(csv)) == 6
+    assert csv.exists() and len(pd.read_csv(csv)) == 1 + len(SEEN) + len(UNSEEN)
 
     quick_out = tmp_path / "outputs_quick" / "cnn_baseline"
     quick_out.mkdir(parents=True)
@@ -78,3 +79,27 @@ def test_scripts_run_from_any_directory(script, tmp_path):
                          cwd=tmp_path, capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
     assert f"esr {script}" in res.stdout
+
+
+def test_evaluate_accepts_checkpoint_path(fake_root, tmp_path):
+    main(["train", "--experiment", "cnn_baseline", *_args(fake_root, tmp_path / "a"), "--epochs", "1"])
+    ckpt = tmp_path / "a" / "cnn_baseline" / "best.pt"
+    main(["evaluate", "--experiment", "cnn_baseline", *_args(fake_root, tmp_path / "b"), "--severities", "1",
+          "--checkpoint", str(ckpt)])
+    assert (tmp_path / "b" / "cnn_baseline" / "robustness.csv").exists()
+
+
+def test_compare_uses_only_latest_protocol_and_writes_detail(tmp_path):
+    cols = ["experiment", "condition", "group", "severity", "mAP"]
+    rows = [("x", "clean", "clean", 0, 0.5), ("x", "telephone", "unseen", 1, 0.25)]
+    (tmp_path / "old").mkdir()
+    (tmp_path / "new").mkdir()
+    pd.DataFrame([("old_model", *r[1:]) for r in rows], columns=cols).to_csv(  # v1 file: no protocol column
+        tmp_path / "old" / "robustness.csv", index=False)
+    pd.DataFrame(rows, columns=cols).assign(subset=False, protocol=2).to_csv(
+        tmp_path / "new" / "robustness.csv", index=False)
+    out = tmp_path / "summary.csv"
+    table = compare([str(tmp_path / "*" / "robustness.csv")], out=str(out))
+    assert table["experiment"].tolist() == ["x"]
+    detail = pd.read_csv(tmp_path / "summary_by_condition.csv")
+    assert detail["experiment"].tolist() == ["x"] and detail["rel"].tolist() == pytest.approx([0.5])

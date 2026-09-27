@@ -4,7 +4,8 @@ import pytest
 import torch
 
 from esr.corruptions import (
-    _fft_convolve, _fft_size, CORRUPTIONS, SEEN, UNSEEN, add_noise_at_snr, apply_corruption, colored_noise, random_train_corruption,
+    _band_pass, _fft_convolve, _fft_size, CORRUPTIONS, QUANT_BITS, SEEN, SNR_BAND_HZ, SPEED_FACTOR, UNSEEN,
+    add_noise_at_snr, apply_corruption, colored_noise, random_train_corruption,
 )
 
 SR = 16000
@@ -25,11 +26,11 @@ def _db(x):
 
 def test_registry_matches_spec():
     assert SEEN == ("white_noise", "reverb")
-    assert UNSEEN == ("brown_noise", "telephone", "clipping")
+    assert UNSEEN == ("brown_noise", "telephone", "clipping", "speed", "quantize")
     assert set(CORRUPTIONS) == set(SEEN + UNSEEN)
 
 
-@pytest.mark.parametrize("name", ["white_noise", "reverb", "brown_noise", "telephone", "clipping"])
+@pytest.mark.parametrize("name", ["white_noise", "reverb", "brown_noise", "telephone", "clipping", "speed", "quantize"])
 @pytest.mark.parametrize("severity", [1, 2, 3])
 def test_every_corruption_keeps_shape_and_is_finite(name, severity):
     x = _tone(440) + _tone(60)  # 60 Hz lies outside every telephone band, so every corruption must change x
@@ -121,3 +122,55 @@ def test_fft_convolve_matches_direct_convolution():
     x, h = torch.randn(2, 1000, generator=g), torch.randn(2, 37, generator=g)
     expected = np.stack([np.convolve(x[i].numpy(), h[i].numpy())[:1000] for i in range(2)])
     assert np.allclose(_fft_convolve(x, h).numpy(), expected, atol=1e-4)
+
+
+@pytest.mark.parametrize("name", ["white_noise", "reverb", "brown_noise", "telephone", "clipping", "speed", "quantize"])
+def test_every_corruption_is_finite_on_silence(name):
+    out = apply_corruption(torch.zeros(2, SR), name, 3, _gen())
+    assert out.shape == (2, SR) and torch.isfinite(out).all()
+
+
+def test_brown_noise_snr_is_measured_in_the_analysis_band():
+    # v1 measured broadband RMS: 99.9 % of brown noise lies below 50 Hz, so "0 dB" was ~+29 dB in-band.
+    x = _tone(440)
+    out = apply_corruption(x, "brown_noise", 2, _gen())  # 10 dB inside 50-8000 Hz
+    snr = _db(_band_pass(x, SNR_BAND_HZ, SR)) - _db(_band_pass(out - x, SNR_BAND_HZ, SR))
+    assert torch.allclose(snr, torch.full_like(snr, 10.0), atol=0.5)
+
+
+def test_added_noise_has_no_energy_outside_the_analysis_band():
+    x = _tone(440)
+    out = apply_corruption(x, "brown_noise", 3, _gen())
+    spec = torch.fft.rfft(out - x).abs().pow(2)
+    freqs = torch.fft.rfftfreq(x.size(-1), d=1.0 / SR)
+    outside = spec[..., freqs < SNR_BAND_HZ[0]].sum(-1)
+    assert (outside < 1e-6 * spec.sum(-1)).all()
+
+
+def test_speed_shifts_pitch_up_and_keeps_length():
+    x = _tone(1000)
+    out = apply_corruption(x, "speed", 3, _gen())
+    peak_hz = torch.fft.rfft(out).abs().argmax(-1).float() * SR / x.size(-1)
+    assert out.shape == x.shape
+    assert torch.allclose(peak_hz, torch.full_like(peak_hz, 1000 * SPEED_FACTOR[3]), atol=10)
+    assert out[:, -int(SR * 0.2):].abs().max() == 0  # the shortened clip is zero-padded at the end
+
+
+@pytest.mark.parametrize("severity", [1, 2, 3])
+def test_quantize_levels_and_error(severity):
+    x = _tone(440, batch=1)
+    out = apply_corruption(x, "quantize", severity, _gen())
+    step = x.abs().max() / 2 ** (QUANT_BITS[severity] - 1)
+    assert out.unique().numel() <= 2 ** QUANT_BITS[severity] + 1
+    assert (out - x).abs().max() <= step / 2 + 1e-6
+
+
+def test_random_train_corruption_draws_from_given_ranges(monkeypatch):
+    import esr.corruptions as c
+
+    seen = {"snr": [], "rt60": []}
+    monkeypatch.setattr(c, "add_noise_at_snr", lambda x, n, snr, sr=16000: seen["snr"].append(snr) or x)
+    monkeypatch.setattr(c, "apply_reverb", lambda x, rt60, sr, g: seen["rt60"].append(rt60) or x)
+    c.random_train_corruption(_tone(440, batch=40), 1.0, _gen(), snr_db=(0.0, 1.0), rt60_s=(0.9, 1.0))
+    assert seen["snr"] and seen["rt60"]
+    assert all(0.0 <= s <= 1.0 for s in seen["snr"]) and all(0.9 <= r <= 1.0 for r in seen["rt60"])

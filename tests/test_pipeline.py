@@ -4,8 +4,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from esr.corruptions import SEEN, UNSEEN
-from esr.pipeline import build_datasets, run_robustness, run_training, summarize
+from esr.corruptions import PROTOCOL, SEEN, UNSEEN
+from esr.pipeline import build_datasets, per_condition, run_robustness, run_training, summarize
 
 
 def test_build_datasets_respects_subset(tiny_cfg):
@@ -65,7 +65,7 @@ def test_run_robustness_rows_and_groups(tiny_cfg):
     cfg = tiny_cfg(severities=(1,))
     run_training(cfg)
     df = run_robustness(cfg)
-    assert list(df.columns) == ["experiment", "condition", "group", "severity", "mAP", "subset"]
+    assert list(df.columns) == ["experiment", "condition", "group", "severity", "mAP", "subset", "protocol"]
     assert len(df) == 1 + len(SEEN) + len(UNSEEN)
     assert df.set_index("condition").loc["clean", "group"] == "clean"
     assert set(df[df.group == "seen"].condition) == set(SEEN)
@@ -89,3 +89,29 @@ def test_summarize():
     assert s.loc["a", "seen"] == pytest.approx(0.35)
     assert s.loc["a", "unseen_rel"] == pytest.approx(0.5)
     assert s.loc["b", "seen_rel"] == pytest.approx(1.0)
+
+
+def test_run_robustness_from_checkpoint_outside_out_dir(tiny_cfg, tmp_path):
+    trained = tiny_cfg(severities=(1,))
+    run_training(trained)
+    ckpt = Path(trained.out_dir) / trained.experiment / "best.pt"
+    fresh = tiny_cfg(severities=(1,), out_dir=str(tmp_path / "elsewhere"))
+    df = run_robustness(fresh, checkpoint=str(ckpt))
+    assert (tmp_path / "elsewhere" / fresh.experiment / "robustness.csv").exists()
+    assert not (ckpt.parent / "robustness.csv").exists()  # never write next to a (read-only) input checkpoint
+    assert (df["protocol"] == PROTOCOL).all()
+
+
+def test_per_condition_is_relative_to_own_clean():
+    df = pd.DataFrame([
+        ("a", "clean", "clean", 0, 0.5), ("a", "telephone", "unseen", 3, 0.2),
+        ("b", "clean", "clean", 0, 0.8), ("b", "telephone", "unseen", 3, 0.4),
+    ], columns=["experiment", "condition", "group", "severity", "mAP"])
+    d = per_condition(df)
+    assert "clean" not in set(d["condition"])
+    rel = d.set_index("experiment")["rel"]
+    assert rel["a"] == pytest.approx(0.4) and rel["b"] == pytest.approx(0.5)
+
+
+def test_run_training_effnet_robust_v2_smoke(tiny_cfg):
+    assert len(run_training(tiny_cfg("effnet_robust_v2"))["history"]) == 1

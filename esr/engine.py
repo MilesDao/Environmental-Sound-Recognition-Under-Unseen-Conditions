@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .augment import mixup
+from .augment import mixup, random_eq
 from .corruptions import apply_corruption, random_train_corruption
 
 
@@ -68,7 +68,10 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler, device, cfg, rn
         wav = wav.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         if cfg.corruption_aug_p > 0:
-            wav = random_train_corruption(wav, cfg.corruption_aug_p, gen, cfg.sample_rate)
+            wav = random_train_corruption(wav, cfg.corruption_aug_p, gen, cfg.sample_rate, cfg.train_snr_db,
+                                          cfg.train_rt60_s)
+        if cfg.eq_aug_p > 0:
+            wav = random_eq(wav, cfg.eq_aug_p, gen, cfg.sample_rate, cfg.eq_max_db)
         wav, y = mixup(wav, y, cfg.mixup_alpha, rng)
         with _autocast(device, cfg.amp):
             logits = model(wav, spec_transform)
@@ -99,11 +102,14 @@ def predict(model, loader, device, amp):
 def predict_array(model, waves, device, batch_size, amp, corruption=None, severity=1, seed=0, sample_rate=16000):
     model.eval()
     out = []
-    for b, start in enumerate(range(0, len(waves), batch_size)):
+    for start in range(0, len(waves), batch_size):
         wav = torch.from_numpy(waves[start:start + batch_size].astype(np.float32) / 32767.0).to(device)
-        if corruption is not None:
-            gen = torch.Generator().manual_seed(seed * 100003 + b)
-            wav = apply_corruption(wav, corruption, severity, gen, sample_rate)
+        if corruption is not None:  # one generator per clip: identical noise for any batch_size
+            wav = torch.cat([
+                apply_corruption(wav[i:i + 1], corruption, severity,
+                                 torch.Generator().manual_seed(seed * 100003 + start + i), sample_rate)
+                for i in range(wav.size(0))
+            ])
         with _autocast(device, amp):
             logits = model(wav)
         out.append(torch.sigmoid(logits.float()).cpu().numpy())

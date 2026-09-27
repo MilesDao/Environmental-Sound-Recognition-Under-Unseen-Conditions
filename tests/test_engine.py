@@ -80,3 +80,29 @@ def test_checkpoint_roundtrip(setup, tmp_path):
     for a, b in zip(model.state_dict().values(), other.state_dict().values()):
         assert torch.equal(a, b)
     assert not (tmp_path / "c.pt.tmp").exists()
+
+
+def test_predict_array_corruption_does_not_depend_on_batch_size(setup):
+    cfg, model, _, wav = setup
+    waves = (wav.numpy() * 32767).astype(np.int16)
+    dev = torch.device("cpu")
+    a = predict_array(model, waves, dev, 3, False, corruption="white_noise", severity=2, seed=1)
+    b = predict_array(model, waves, dev, 8, False, corruption="white_noise", severity=2, seed=1)
+    assert np.allclose(a, b, atol=1e-5)
+
+
+def test_train_one_epoch_passes_v2_augmentation_settings(tiny_cfg, monkeypatch):
+    import esr.engine as engine
+
+    calls = []
+    monkeypatch.setattr(engine, "random_train_corruption",
+                        lambda wav, p, gen, sr, snr_db, rt60_s: calls.append(("corrupt", snr_db, rt60_s)) or wav)
+    monkeypatch.setattr(engine, "random_eq", lambda wav, p, gen, sr, max_db: calls.append(("eq", p, max_db)) or wav)
+    cfg = tiny_cfg(corruption_aug_p=0.5, eq_aug_p=0.5, eq_max_db=9.0, train_snr_db=(0.0, 30.0),
+                   train_rt60_s=(0.2, 1.0))
+    model = build_model(cfg, n_classes=5)
+    loader = DataLoader(TensorDataset(torch.randn(4, cfg.clip_samples) * 0.1, torch.ones(4, 5)), batch_size=4)
+    opt, sch, scaler = _opt(model, 1)
+    train_one_epoch(model, loader, opt, sch, scaler, torch.device("cpu"), cfg,
+                    np.random.default_rng(0), torch.Generator().manual_seed(0))
+    assert calls == [("corrupt", (0.0, 30.0), (0.2, 1.0)), ("eq", 0.5, 9.0)]

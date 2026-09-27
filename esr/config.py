@@ -34,6 +34,10 @@ class Config:
     mixup_alpha: float = 0.5  # 0 disables mixup
     freq_mixstyle_p: float = 0.0
     corruption_aug_p: float = 0.0
+    train_snr_db: tuple = (5.0, 30.0)  # white-noise SNR range of the seen-corruption augmentation
+    train_rt60_s: tuple = (0.2, 0.8)  # reverb RT60 range of the seen-corruption augmentation
+    eq_aug_p: float = 0.0  # random EQ (FilterAugment-style) per clip
+    eq_max_db: float = 12.0
     # evaluation / bookkeeping
     severities: tuple = (1, 2, 3)
     max_train_clips: int = 0  # 0 = use all
@@ -50,12 +54,19 @@ class Config:
         return d
 
 
+_EFFNET = dict(model="efficientnet_b0", pretrained=True, lr=5e-4)
+
 EXPERIMENTS = {
     "cnn_baseline": dict(model="simple_cnn", pretrained=False, lr=1e-3),
-    "effnet_standard": dict(model="efficientnet_b0", pretrained=True, lr=5e-4),
-    "effnet_robust": dict(
-        model="efficientnet_b0", pretrained=True, lr=5e-4, freq_mixstyle_p=0.7, corruption_aug_p=0.5
-    ),
+    "effnet_standard": dict(_EFFNET),
+    "effnet_robust": dict(_EFFNET, freq_mixstyle_p=0.7, corruption_aug_p=0.5),  # Experiment 1
+    # v2: + random EQ, and seen-corruption ranges widened to cover severity 3 (0 dB SNR, RT60 1.0 s)
+    "effnet_robust_v2": dict(_EFFNET, freq_mixstyle_p=0.7, corruption_aug_p=0.5, eq_aug_p=0.5,
+                             train_snr_db=(0.0, 30.0), train_rt60_s=(0.2, 1.0)),
+    # ablations: exactly one robustness component each (v1 ranges)
+    "effnet_mixstyle": dict(_EFFNET, freq_mixstyle_p=0.7),
+    "effnet_corrupt": dict(_EFFNET, corruption_aug_p=0.5),
+    "effnet_eq": dict(_EFFNET, eq_aug_p=0.5),
 }
 
 
