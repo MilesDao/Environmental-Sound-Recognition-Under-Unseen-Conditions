@@ -199,3 +199,72 @@ This needs new presets in `esr/config.py` (`EXPERIMENTS`). The CLI already accep
 
 Implementation plan: `docs/superpowers/plans/2026-09-27-esr-v2-next-steps.md`. Run order and decision gates: see the plan's "Kaggle Run Plan".
 Protocol v2 = band-limited SNR (50–8000 Hz), per-clip eval seeds, 22 conditions (UNSEEN adds `speed`, `quantize`).
+
+---
+
+### Experiment 2a: `effnet_robust` under protocol v2
+
+**Date:** 2026-09-28 · **Hardware:** Kaggle GPU (single T4) · **Protocol:** 2 (22 conditions)
+
+#### 2a.1 Results
+
+Summary (`compare.py`):
+
+| Experiment | Clean | Seen | Unseen | Seen rel. | Unseen rel. |
+|---|---:|---:|---:|---:|---:|
+| effnet_robust | 0.5580 | 0.5001 | 0.4731 | 0.896 | 0.848 |
+
+Relative mAP (corrupted / clean) per condition (`summary_by_condition.csv`). Protocol-v1 values from §1.3 are shown for comparison.
+
+| Condition | Group | Sev 1 | Sev 2 | Sev 3 | v1 (sev 1 / 2 / 3) |
+|---|---|---:|---:|---:|---|
+| white_noise | seen | 0.979 | 0.931 | 0.790 | 0.967 / 0.922 / 0.787 |
+| reverb | seen | 0.927 | 0.904 | 0.848 | 0.922 / 0.900 / 0.844 |
+| brown_noise | unseen | 0.976 | 0.927 | 0.789 | 0.988 / 0.980 / 0.968 |
+| speed | unseen (new) | 0.975 | 0.959 | 0.909 | – |
+| clipping | unseen | 0.988 | 0.918 | 0.710 | 0.982 / 0.908 / 0.702 |
+| quantize | unseen (new) | 0.983 | 0.915 | 0.694 | – |
+| telephone | unseen | 0.888 | 0.691 | **0.398** | 0.891 / 0.695 / 0.422 |
+
+The summary scores are **not comparable** with Experiment 1: unseen now averages 5 conditions instead of 3, and the noise definition changed. `compare` refuses to mix the two protocols.
+
+#### 2a.2 Analysis
+
+1. **The protocol fix works.**
+   - At equal in-band SNR, brown noise now costs as much as white noise (0.976 / 0.927 / 0.789 vs 0.979 / 0.931 / 0.790).
+   - In v1 it was almost a no-op (0.968 at 0 dB).
+   - The unseen score is now carried by five meaningful conditions.
+2. **Brown ≈ white is a promising sign of transfer, but not yet evidence.**
+   - The model is as robust to a noise colour it never trained on as to the one it did.
+   - Whether that comes from the white-noise augmentation or is simply how EfficientNet behaves can only be decided against `effnet_standard`:
+     - If the standard model shows a larger brown–white gap, the augmentation transfers.
+     - If not, it is architecture.
+3. **Every condition breaks at severity 3.**
+   - At severity 1 every condition keeps ≥ 0.97 of clean mAP, except telephone (0.89) and reverb (0.93).
+   - At severity 3 most conditions drop to 0.69–0.79; speed (0.91) and reverb (0.85) hold up best.
+4. **The unseen conditions rank:** telephone ≫ quantize ≈ clipping ≈ brown_noise > speed.
+   - **Speed:** a 30 % speed-up (≈ +4.5 semitones) barely matters (0.91), so the model does not rely on exact pitch.
+   - **Quantize:** 4-bit quantisation (0.69) hurts as much as clipping at 5 % of peak (0.71). At 4 bits, quiet events fall below one quantisation step and disappear.
+5. **Telephone band-limiting is still the main failure** (0.40 at 500–2000 Hz). Nothing in the current recipe addresses it; the `effnet_robust_v2` random-EQ augmentation targets it.
+6. **Reverb costs 7 % even at its mildest setting** (RT60 0.3 s), which lies inside the training range.
+
+#### 2a.3 Run-to-run variation
+
+Clean, telephone and clipping are deterministic, so re-evaluating the same checkpoint would reproduce §1.3 exactly. They moved slightly:
+
+| Condition | §1.3 (v1) | 2a (v2) |
+|---|---:|---:|
+| clean | 0.5565 | 0.5580 |
+| telephone sev 3 (absolute) | 0.2351 | 0.2221 |
+| clipping sev 3 (absolute) | 0.3906 | 0.3962 |
+
+So this model is a retraining of `effnet_robust`, not the Experiment 1 checkpoint. The gap gives a first estimate of seed-to-seed noise: **about ±0.002 on clean mAP and up to about ±0.015 at severity 3.** Treat model differences smaller than that as noise unless they are confirmed with a second seed.
+
+(If this run did use `--checkpoint` on the Experiment 1 `best.pt`, then evaluation is not deterministic and must be investigated before comparing models.)
+
+#### 2a.4 Next steps
+
+1. **Session 1 of the Run Plan:** train and evaluate `effnet_standard` and `cnn_baseline` under protocol 2. Every robustness claim depends on this comparison, including the brown ≈ white transfer question.
+2. **Session 2:** train and evaluate `effnet_robust_v2` and `effnet_eq`.
+   - Success criterion: telephone sev 2–3 rises clearly above 0.69 / 0.40, while clean mAP drops by at most 0.005.
+3. **Seed check:** if `effnet_robust_v2` and `effnet_robust` differ by less than about 0.015 at severity 3, run a second seed of both before concluding.
