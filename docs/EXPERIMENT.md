@@ -195,7 +195,7 @@ This needs new presets in `esr/config.py` (`EXPERIMENTS`). The CLI already accep
 
 ---
 
-## Experiment 2 (planned): baselines + protocol v2 + `effnet_robust_v2`
+## Experiment 2 (in progress): baselines + protocol v2 + `effnet_robust_v2`
 
 Implementation plan: `docs/superpowers/plans/2026-09-27-esr-v2-next-steps.md`. Run order and decision gates: see the plan's "Kaggle Run Plan".
 Protocol v2 = band-limited SNR (50–8000 Hz), per-clip eval seeds, 22 conditions (UNSEEN adds `speed`, `quantize`).
@@ -268,3 +268,116 @@ So this model is a retraining of `effnet_robust`, not the Experiment 1 checkpoin
 2. **Session 2:** train and evaluate `effnet_robust_v2` and `effnet_eq`.
    - Success criterion: telephone sev 2–3 rises clearly above 0.69 / 0.40, while clean mAP drops by at most 0.005.
 3. **Seed check:** if `effnet_robust_v2` and `effnet_robust` differ by less than about 0.015 at severity 3, run a second seed of both before concluding.
+
+---
+
+### Experiment 2b: `effnet_robust_v2` (+ random EQ, wider seen ranges)
+
+**Date:** 2026-09-28 · **Hardware:** Kaggle GPU (single T4) · **Protocol:** 2
+
+Setup: the same recipe as `effnet_robust`, plus these changes:
+- **Random EQ:** `eq_aug_p = 0.5`, ±12 dB.
+- **Wider seen-corruption ranges:** SNR 0–30 dB (was 5–30) and RT60 0.2–1.0 s (was 0.2–0.8). Severity 3 of the seen conditions now lies inside the training range.
+
+#### 2b.1 Results vs `effnet_robust` (2a)
+
+| | `effnet_robust` | `effnet_robust_v2` | Change |
+|---|---:|---:|---:|
+| Clean mAP | 0.5580 | 0.5572 | −0.0008 |
+| Seen relative | 0.896 | 0.898 | +0.002 |
+| Unseen relative | 0.848 | 0.852 | +0.004 |
+
+Relative mAP per condition (sev 1 / 2 / 3):
+
+| Condition | Group | `effnet_robust` | `effnet_robust_v2` | Change at sev 3 |
+|---|---|---|---|---:|
+| reverb | seen | 0.927 / 0.904 / 0.848 | 0.924 / 0.905 / 0.871 | +0.023 |
+| white_noise | seen | 0.979 / 0.931 / 0.790 | 0.971 / 0.920 / 0.797 | +0.007 |
+| brown_noise | unseen | 0.976 / 0.927 / 0.789 | 0.979 / 0.930 / 0.792 | +0.003 |
+| speed | unseen | 0.975 / 0.959 / 0.909 | 0.981 / 0.964 / 0.919 | +0.010 |
+| clipping | unseen | 0.988 / 0.918 / 0.710 | 0.986 / 0.910 / 0.703 | −0.007 |
+| quantize | unseen | 0.983 / 0.915 / 0.694 | 0.979 / 0.907 / 0.685 | −0.009 |
+| telephone | unseen | 0.888 / 0.691 / 0.398 | 0.892 / 0.714 / **0.445** | **+0.047** |
+
+#### 2b.2 Analysis
+
+1. **Random EQ helps telephone, moderately.**
+   - Sev 3 rises by +0.047, which is well above the seed noise estimated in 2a.3 (about ±0.015).
+   - Sev 2 rises by +0.023, which is borderline.
+   - Telephone is still the weakest condition (0.445).
+2. **Clean accuracy is unchanged** (−0.0008), so the plan's success criterion (clean drop ≤ 0.005) is met.
+3. **Widening the seen ranges helps reverb but not white noise.**
+   - Reverb sev 3 (RT60 1.0 s) rises by +0.023, as expected now that it is inside the training range.
+   - White noise at 0 dB rises by only +0.007, even though 0 dB is now trained on.
+4. **Every other unseen condition is unchanged**, with all changes within ±0.01.
+5. **Caveat on honesty:** random EQ and telephone band-limiting both change the spectral envelope. The telephone gain is therefore partly "near-seen" rather than a pure unseen-condition result, and should be reported with that caveat (see ARCHITECHTURE.md pitfall 16).
+
+---
+
+### Experiment 2c: `effnet_standard` (baseline: no robustness training)
+
+**Date:** 2026-09-29 · **Hardware:** Kaggle GPU (single T4) · **Protocol:** 2
+
+Setup: the same network, pretraining and optimiser as `effnet_robust`, with MixStyle, corruption augmentation and random EQ all switched off. SpecAugment, mixup and balanced sampling stay on, as in every preset.
+
+#### 2c.1 Results: all three EfficientNet models
+
+| | `effnet_standard` | `effnet_robust` | `effnet_robust_v2` |
+|---|---:|---:|---:|
+| Clean mAP | 0.5483 | 0.5580 | 0.5572 |
+| Seen mAP | 0.3792 | 0.5001 | 0.5004 |
+| Unseen mAP | 0.4418 | 0.4731 | 0.4750 |
+| Seen relative | 0.692 | 0.896 | 0.898 |
+| Unseen relative | 0.806 | 0.848 | **0.852** |
+
+Relative mAP per condition (sev 1 / 2 / 3):
+
+| Condition | Group | `effnet_standard` | `effnet_robust` | `effnet_robust_v2` | Gain at sev 3 (robust − standard) |
+|---|---|---|---|---|---:|
+| reverb | seen | 0.695 / 0.621 / 0.552 | 0.927 / 0.904 / 0.848 | 0.924 / 0.905 / 0.871 | **+0.296** |
+| white_noise | seen | 0.917 / 0.798 / 0.568 | 0.979 / 0.931 / 0.790 | 0.971 / 0.920 / 0.797 | **+0.222** |
+| telephone | unseen | 0.793 / 0.577 / 0.283 | 0.888 / 0.691 / 0.398 | 0.892 / 0.714 / 0.445 | **+0.115** (v2: +0.162) |
+| quantize | unseen | 0.959 / 0.861 / 0.609 | 0.983 / 0.915 / 0.694 | 0.979 / 0.907 / 0.685 | +0.085 |
+| clipping | unseen | 0.983 / 0.893 / 0.638 | 0.988 / 0.918 / 0.710 | 0.986 / 0.910 / 0.703 | +0.072 |
+| brown_noise | unseen | 0.978 / 0.912 / 0.746 | 0.976 / 0.927 / 0.789 | 0.979 / 0.930 / 0.792 | +0.043 |
+| speed | unseen | 0.980 / 0.964 / 0.911 | 0.975 / 0.959 / 0.909 | 0.981 / 0.964 / 0.919 | −0.002 |
+
+#### 2c.2 Analysis
+
+1. **Robustness training transfers to unseen conditions.**
+   - Unseen relative rises from 0.806 (standard) to 0.848 (robust) and 0.852 (v2): +0.042 and +0.046.
+   - Both gains are about 3× the seed noise, and they clear the plan's decision gate (> 0.02).
+   - This answers the project's central question for this setup: training on the seen family improves robustness to conditions that were never trained on.
+2. **There is no clean-accuracy cost; clean accuracy actually improves.**
+   - Clean mAP rises from 0.5483 to 0.558 (+0.010, about 5× the clean seed noise).
+   - The robustness augmentations also act as a regulariser.
+3. **Without robustness training, EfficientNet is very fragile to reverb.**
+   - Even RT60 0.3 s keeps only 0.695 of clean mAP, and RT60 1.0 s keeps 0.552.
+   - Reverb is the single biggest failure mode of the standard model; training on it recovers +0.23 to +0.30.
+4. **The unseen gain is concentrated in telephone, quantize and clipping.**
+   - Telephone gains about +0.11 at every severity, even for `effnet_robust`, which never sees any spectral-envelope augmentation.
+   - The most likely source is frequency-wise MixStyle, which randomises per-frequency statistics. The `effnet_mixstyle` vs `effnet_corrupt` ablation would confirm this.
+   - v2's random EQ adds a further +0.047 at sev 3. Altogether, telephone sev 3 goes from 0.283 to 0.445, 57 % better than the baseline.
+5. **This corrects 2a.2 point 2 (brown ≈ white transfer).**
+   - The baseline shows brown noise was already much easier than white noise without any training (0.746 vs 0.568 at sev 3).
+   - Training lifted white noise by +0.22 but brown noise by only +0.04.
+   - So brown and white end up equal in 2a mainly because white noise caught up. The transfer from white-noise training to brown noise is real but small (+0.04 at sev 3).
+6. **Speed needs no robustness training.** All three models keep about 0.91 at sev 3, so the condition does not separate the models; linear speed-up up to ×1.3 is intrinsically easy for this architecture.
+
+---
+
+### Experiment 2: status and next steps
+
+| Experiment | Status |
+|---|---|
+| `effnet_robust` | ✅ 2a |
+| `effnet_robust_v2` | ✅ 2b |
+| `effnet_standard` | ✅ 2c |
+| `cnn_baseline` | ⏳ architecture and pretraining comparison |
+| `effnet_mixstyle`, `effnet_corrupt` | ⏳ ablation: which component gives the unseen gain (especially telephone +0.11)? |
+| `effnet_eq` | ⏳ ablation: does random EQ alone explain v2's extra telephone gain? |
+
+1. **`cnn_baseline`:** do a `--quick` run first to time an epoch. The model needs about 26× EfficientNet-B0's compute (torchinfo), so 20 epochs may not fit in one 12 h session.
+2. **`effnet_mixstyle` and `effnet_corrupt`:** together with 2c they attribute the unseen gain to a component.
+3. **`effnet_eq`:** optional.
+4. **Final comparison:** attach every version's output as a Kaggle input and run `compare.py`, so all models appear in one `summary.csv` / `summary_by_condition.csv`.
